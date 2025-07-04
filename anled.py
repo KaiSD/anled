@@ -25,7 +25,7 @@ except ImportError:
     import msvcrt
     IS_UNIX = False
 
-_VERSION = "0.9.1"
+_VERSION = "0.9.2"
 
 def term_size() -> Tuple[int, int]:
     size = shutil.get_terminal_size(fallback=(80, 24))
@@ -100,6 +100,7 @@ class FallbackEditor:
         "\n".join([
             "=== Help ===",
             "q         Quit (prompts to save if modified)",
+            "o         Save current file",
             "w / s     Move selector up/down one line",
             "u / j     Move selector up/down one page",
             "[number]  Go to a specific line number",
@@ -140,8 +141,25 @@ class FallbackEditor:
             return
 
         if not self.path:
-            print("No file path specified. Cannot save.")
-            return
+            try:
+                filename = input("Save as: ")
+                if not filename:
+                    print("Save cancelled.")
+                    return
+                self.path = pathlib.Path(filename)
+            except (KeyboardInterrupt, EOFError):
+                print("\nSave cancelled.")
+                return
+
+        if self.path.exists():
+            try:
+                overwrite = input(f'File "{self.path}" already exists. Overwrite? (y/N): ')
+                if not overwrite.lower().startswith('y'):
+                    print("Save cancelled.")
+                    return
+            except (KeyboardInterrupt, EOFError):
+                print("\nSave cancelled.")
+                return
 
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         content = "".join(self.lines)
@@ -164,7 +182,7 @@ class FallbackEditor:
                 if rows_used >= max_height:
                     break
 
-                prefix = f"{i+1:>4} │ " if j == 0 else "     │ "
+                prefix = f"{i+1:>4} │ " if j == 0 else "      │ "
                 full_line_content = prefix + chunk
 
                 if i == self.selector:
@@ -199,7 +217,7 @@ class FallbackEditor:
     def _edit_line(self) -> None:
         k = self.selector
         print(f"Old {k+1}: {self.lines[k].rstrip()}")
-        new = input("New   → ")
+        new = input("New     → ")
         if not new.endswith("\n"):
             new += "\n"
         self.lines[k] = new
@@ -328,6 +346,8 @@ class FallbackEditor:
                         self._save_file()
                 self.running = False
 
+            elif action == "o":
+                self._save_file()
             elif action == "w": self.selector = max(0, self.selector - 1)
             elif action == "s": self.selector = min(len(self.lines) - 1, self.selector + 1)
             elif action == "u": self.selector = max(0, self.selector - page_jump)
@@ -354,8 +374,6 @@ class FallbackEditor:
             return "".join(self.lines)
         return None
 
-
-
 class Key(Enum):
     CTRL_A, CTRL_C, CTRL_D, CTRL_E, CTRL_F, CTRL_H, CTRL_L, CTRL_N, CTRL_P, \
     CTRL_Q, CTRL_S, CTRL_V, CTRL_X, CTRL_Y, ENTER, ESCAPE, BACKSPACE, TAB = range(18)
@@ -368,28 +386,26 @@ class Key(Enum):
     CTRL_SHIFT_UP, CTRL_SHIFT_DOWN, CTRL_SHIFT_INSERT, CTRL_SHIFT_DELETE = range(46, 54)
     CTRL_0, CTRL_1, CTRL_2, CTRL_3, CTRL_4, CTRL_5, CTRL_6, CTRL_7, CTRL_8, \
     CTRL_9 = range(54, 64)
+    F1 = auto()
+    CTRL_G = auto()
     UNKNOWN = auto()
     CHAR = auto()
 
 class KeyDecoder:
     def __init__(self):
         self.key_map = {
-            # Standard Arrow Keys
             '\x1b[A': Key.UP, '\x1b[B': Key.DOWN, '\x1b[C': Key.RIGHT, '\x1b[D': Key.LEFT,
-            # Home/End/Delete/Insert/Page
             '\x1b[H': Key.HOME, '\x1b[F': Key.END, '\x1b[2~': Key.INSERT, '\x1b[3~': Key.DELETE,
             '\x1b[5~': Key.PAGE_UP, '\x1b[6~': Key.PAGE_DOWN,
-            # Shift Combinations
+            '\x1b[11~': Key.F1, '\x1bOP': Key.F1,
             '\x1b[1;2A': Key.SHIFT_UP, '\x1b[1;2B': Key.SHIFT_DOWN,
             '\x1b[1;2C': Key.SHIFT_RIGHT, '\x1b[1;2D': Key.SHIFT_LEFT,
             '\x1b[1;2H': Key.SHIFT_HOME, '\x1b[1;2F': Key.SHIFT_END,
             '\x1b[2;2~': Key.SHIFT_INSERT, '\x1b[3;2~': Key.SHIFT_DELETE,
-            # Ctrl Combinations
             '\x1b[1;5A': Key.CTRL_UP, '\x1b[1;5B': Key.CTRL_DOWN,
             '\x1b[1;5C': Key.CTRL_RIGHT, '\x1b[1;5D': Key.CTRL_LEFT,
             '\x1b[1;5H': Key.CTRL_HOME, '\x1b[1;5F': Key.CTRL_END,
             '\x1b[2;5~': Key.CTRL_INSERT, '\x1b[3;5~': Key.CTRL_DELETE,
-            # Ctrl+Shift Combinations
             '\x1b[1;6A': Key.CTRL_SHIFT_UP, '\x1b[1;6B': Key.CTRL_SHIFT_DOWN,
             '\x1b[1;6C': Key.CTRL_SHIFT_RIGHT, '\x1b[1;6D': Key.CTRL_SHIFT_LEFT,
             '\x1b[1;6H': Key.CTRL_SHIFT_HOME, '\x1b[1;6F': Key.CTRL_SHIFT_END,
@@ -411,6 +427,7 @@ class KeyDecoder:
             INSERT=0x2D; DELETE=0x2E; PAGE_UP=0x21; PAGE_DOWN=0x22;
             A=0x41; C=0x43; D=0x44; E=0x45; F=0x46; L=0x4C; H=0x48; N=0x4E; P=0x50;
             Q=0x51; S=0x53; V=0x56; X=0x58; Y=0x59;
+            F1=0x70; G=0x47;
             N0=0x30; N1=0x31; N2=0x32; N3=0x33; N4=0x34; N5=0x35; N6=0x36; N7=0x37; N8=0x38; N9=0x39;
         class KEY_EVENT_RECORD(ctypes.Structure):
             _fields_ = [("bKeyDown", wintypes.BOOL),
@@ -462,7 +479,7 @@ class KeyDecoder:
                         VK.HOME: Key.CTRL_HOME, VK.END: Key.CTRL_END,
                         VK.INSERT: Key.CTRL_INSERT, VK.DELETE: Key.CTRL_DELETE,
                         VK.A: Key.CTRL_A, VK.C: Key.CTRL_C, VK.D: Key.CTRL_D,
-                        VK.E: Key.CTRL_E, VK.F: Key.CTRL_F, VK.H: Key.CTRL_H,
+                        VK.E: Key.CTRL_E, VK.F: Key.CTRL_F, VK.G: Key.CTRL_G, VK.H: Key.CTRL_H,
                         VK.L: Key.CTRL_L, VK.N: Key.CTRL_N, VK.P: Key.CTRL_P,
                         VK.Q: Key.CTRL_Q, VK.S: Key.CTRL_S, VK.V: Key.CTRL_V,
                         VK.X: Key.CTRL_X, VK.Y: Key.CTRL_Y
@@ -486,7 +503,7 @@ class KeyDecoder:
                         VK.HOME: Key.HOME, VK.END: Key.END, VK.DELETE: Key.DELETE,
                         VK.INSERT: Key.INSERT, VK.PAGE_UP: Key.PAGE_UP, VK.PAGE_DOWN: Key.PAGE_DOWN,
                         VK.BACK: Key.BACKSPACE, VK.TAB: Key.TAB, VK.RETURN: Key.ENTER,
-                        VK.ESCAPE: Key.ESCAPE,
+                        VK.ESCAPE: Key.ESCAPE, VK.F1: Key.F1,
                     }
                     if vk in key_map: return key_map[vk], None
 
@@ -503,7 +520,6 @@ class KeyDecoder:
         old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
         try:
-            # Read more characters to complete the escape sequence
             rest_of_seq = sys.stdin.read(5) 
             if rest_of_seq: seq += rest_of_seq
         except (BlockingIOError, InterruptedError): pass
@@ -519,7 +535,7 @@ class KeyDecoder:
             '\x7f': Key.BACKSPACE, '\b': Key.BACKSPACE,
             '\t': Key.TAB, '\x1b': Key.ESCAPE,
             '\x01': Key.CTRL_A, '\x03': Key.CTRL_C, '\x04': Key.CTRL_D,
-            '\x05': Key.CTRL_E, '\x06': Key.CTRL_F, '\x08': Key.CTRL_H,
+            '\x05': Key.CTRL_E, '\x06': Key.CTRL_F, '\x07': Key.CTRL_G, '\x08': Key.CTRL_H,
             '\x0c': Key.CTRL_L, '\x0e': Key.CTRL_N, '\x10': Key.CTRL_P,
             '\x11': Key.CTRL_Q, '\x13': Key.CTRL_S, '\x16': Key.CTRL_V,
             '\x18': Key.CTRL_X, '\x19': Key.CTRL_Y,
@@ -611,9 +627,30 @@ class Editor:
     APP_VERSION = _VERSION
     LINE_NUM_WIDTH = 7
 
+    HELP_TEXT = textwrap.dedent("""\
+        ─────── ANLEd Help (v{version}) ───────
+        F1/Ctrl-H: Toggle this help panel
+        Ctrl-S:    Save file
+        Ctrl-Q:    Quit editor
+        
+        [Selection & Clipboard]
+        Shift+Move: Select text
+        Ctrl-C:     Copy selection
+        Ctrl-X:     Cut selection
+        Ctrl-V:     Paste
+        
+        [Cursor Movement]
+        Arrows:          Move cursor
+        Ctrl+Left/Right: Move by word
+        Home/End:        Go to start/end of line
+        Page Up/Down:    Move by page
+        Ctrl+Home/End:   Go to start/end of document
+    """).format(version=_VERSION)
+
     DEFAULT_KEY_BINDINGS = {
         'quit': (Key.CTRL_Q,Key.ESCAPE),
         'save': (Key.CTRL_S,),
+        'toggle_help': (Key.F1, Key.CTRL_H),
         'copy': (Key.CTRL_C, Key.CTRL_INSERT),
         'cut': (Key.CTRL_X, Key.SHIFT_DELETE),
         'paste': (Key.CTRL_V, Key.SHIFT_INSERT),
@@ -655,7 +692,8 @@ class Editor:
         self.col_offset = 0
         self.running = True
         self.is_dirty = False
-        self.status_message = "HELP: Ctrl-S save | Ctrl-Q quit | Ctrl-C/X/V clipboard"
+        self.status_message = "HELP: Ctrl-S save | Ctrl-Q quit | F1/Ctrl-H help"
+        self.help_mode = False
 
         self.selection_start_x = -1
         self.selection_start_y = -1
@@ -741,7 +779,16 @@ class Editor:
         sys.stdout.write('\x1b[?25l')
 
         width, height = self.get_terminal_size()
-        view_height = height - 2
+        
+        help_panel_height = 0
+        help_text_lines = []
+        if self.help_mode:
+            help_text_lines = self.HELP_TEXT.strip().split('\n')
+            help_panel_height = len(help_text_lines) + 1
+
+        view_height = height - 2 - help_panel_height
+        if view_height < 1: view_height = 1
+        
         text_area_width = width - self.LINE_NUM_WIDTH
 
         if self.cursor_y < self.top_line:
@@ -755,58 +802,74 @@ class Editor:
         if visual_cursor_x >= self.col_offset + text_area_width:
             self.col_offset = visual_cursor_x - text_area_width + 1
 
-        output_commands = []
+        output_buffer = []
         selection = self.get_selection()
 
         for i in range(view_height):
-            output_commands.append(f'\x1b[{i + 1};1H')
+            output_buffer.append(f'\x1b[{i + 1};1H')
             
             buf_idx = self.top_line + i
             if buf_idx < len(self.buffer):
                 line_gb = self.buffer[buf_idx]
-                line_str = str(line_gb)
-
+                line_str_raw = str(line_gb)
+                
                 line_num_prefix = f"{buf_idx + 1:>{self.LINE_NUM_WIDTH - 3}} | "
                 
                 if selection:
                     start_y, start_x, end_y, end_x = selection
                     if start_y <= buf_idx <= end_y:
                         sel_start_char = start_x if buf_idx == start_y else 0
-                        sel_end_char = end_x if buf_idx == end_y else len(line_str)
-                        part1 = line_str[:sel_start_char]
-                        part2 = line_str[sel_start_char:sel_end_char]
-                        part3 = line_str[sel_end_char:]
-                        line_str = f"{part1}\x1b[7m{part2}\x1b[m{part3}"
-                
-                line_to_render = visual_slice(line_str, self.col_offset, self.col_offset + text_area_width)
+                        sel_end_char = end_x if buf_idx == end_y else len(line_str_raw)
+                        part1 = line_str_raw[:sel_start_char]
+                        part2 = line_str_raw[sel_start_char:sel_end_char]
+                        part3 = line_str_raw[sel_end_char:]
+                        line_str_formatted = f"{part1}\x1b[7m{part2}\x1b[m{part3}"
+                    else:
+                        line_str_formatted = line_str_raw
+                else:
+                    line_str_formatted = line_str_raw
+
+                line_to_render = visual_slice(line_str_formatted, self.col_offset, self.col_offset + text_area_width)
                 full_line = f"{line_num_prefix}{line_to_render}"
-                output_commands.append(full_line)
+                output_buffer.append(full_line)
             else:
                 tilde_prefix = " " * (self.LINE_NUM_WIDTH - 2) + "~ "
-                output_commands.append(tilde_prefix)
+                output_buffer.append(tilde_prefix)
             
-            output_commands.append('\x1b[K')
+            output_buffer.append('\x1b[K')
 
-        sys.stdout.write("".join(output_commands))
+        for i in range(view_height, height - 2):
+            output_buffer.append(f'\x1b[{i + 1};1H\x1b[K')
 
+        if self.help_mode:
+            separator_y = view_height + 1
+            output_buffer.append(f'\x1b[{separator_y};1H')
+            output_buffer.append("─" * width)
+
+            for i, line in enumerate(help_text_lines):
+                help_line_y = separator_y + 1 + i
+                if help_line_y < height - 1:
+                    output_buffer.append(f'\x1b[{help_line_y};1H')
+                    output_buffer.append(line.ljust(width))
+        
         dirty_indicator = "*" if self.is_dirty else ""
         filename_display = '[In-Memory]' if self.in_memory else (self.filename or '[No Name]')
         left_status = f"{self.APP_NAME} {self.APP_VERSION} - {filename_display}{dirty_indicator}"
         right_status = f"Ln {self.cursor_y + 1}, Col {visual_cursor_x + 1}"
         
-        status_bar = f"\x1b[7m{left_status.ljust(width - len(right_status))}{right_status}\x1b[m"
-        help_bar = f"{self.status_message[:width].ljust(width)}"
-        
-        sys.stdout.write(f"\x1b[H\x1b[{height-1};1H")
-        sys.stdout.write(status_bar)
-        sys.stdout.write(f"\x1b[H\x1b[{height};1H")
-        sys.stdout.write(help_bar)
+        status_bar_content = f"{left_status.ljust(width - len(right_status))}{right_status}"
+        output_buffer.append(f"\x1b[{height-1};1H\x1b[7m{status_bar_content}\x1b[m")
 
+        help_bar_content = self.status_message[:width].ljust(width)
+        output_buffer.append(f"\x1b[{height};1H{help_bar_content}")
+        
         draw_y = self.cursor_y - self.top_line + 1
         draw_x = visual_cursor_x - self.col_offset + 1 + self.LINE_NUM_WIDTH
-        sys.stdout.write(f'\x1b[{draw_y};{draw_x}H')
+        output_buffer.append(f'\x1b[{draw_y};{draw_x}H')
 
-        sys.stdout.write('\x1b[?25h')
+        output_buffer.append('\x1b[?25h')
+        
+        sys.stdout.write("".join(output_buffer))
         sys.stdout.flush()
 
     def _find_next_word(self):
@@ -886,7 +949,7 @@ class Editor:
         self.is_selecting = False
 
     def handle_keypress(self, key, char):
-        self.status_message = "HELP: Ctrl-S save | Ctrl-Q quit | Ctrl-C/X/V clipboard"
+        self.status_message = "HELP: Ctrl-S save | Ctrl-Q quit | F1/Ctrl-G help"
 
         if key in self._plain_movement_keys and self.is_selecting:
             self.is_selecting = False
@@ -910,6 +973,8 @@ class Editor:
             else:
                 self.running = False
             return
+        elif action == 'toggle_help':
+            self.help_mode = not self.help_mode
         elif action == 'save': self.save_file()
         elif action == 'copy': self.copy_selection()
         elif action == 'cut':
@@ -997,7 +1062,7 @@ class Editor:
     def save_file(self):
         if self.in_memory:
             self.status_message = "In-memory mode: Save not applicable."
-            self.is_dirty = False # Still mark as not dirty
+            self.is_dirty = False 
             return True
 
         if not self.filename:
@@ -1006,6 +1071,13 @@ class Editor:
                 self.status_message = "Save cancelled."
                 return False
             self.filename = new_filename
+        
+        if os.path.exists(self.filename):
+            overwrite = self.prompt(f'File "{self.filename}" already exists. Overwrite? (y/N): ')
+            if overwrite is None or not overwrite.lower().startswith('y'):
+                self.status_message = "Save cancelled."
+                return False
+        
         try:
             with open(self.filename, 'w', encoding="utf-8") as f:
                 f.write('\n'.join(str(gb) for gb in self.buffer))
@@ -1047,23 +1119,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ANLEd - A Nano-Like Editor")
     parser.add_argument("file", nargs="?", help="File to edit")
     parser.add_argument("--nonraw", action="store_true", 
-                       help="Use fallback editor instead of raw terminal mode")
+                        help="Use fallback editor instead of raw terminal mode")
     
     args = parser.parse_args()
     file_arg = args.file
+    fallback = args.nonraw
+
+    try:
+        if IS_UNIX:
+            try:
+                termios.tcgetattr(sys.stdin.fileno())
+            except termios.error:
+                fallback = True
     
-    if args.nonraw:
-        FallbackEditor(file_arg).run()
-    else:
-        try:
-            Editor(file_arg).run()
-        except termios.error:
-            sys.stdout.write('\x1b[2J\x1b[H')
-            sys.stdout.flush()
+    try:
+        if fallback:
             FallbackEditor(file_arg).run()
-        except Exception:
-            sys.stdout.write('\x1b[2J\x1b[H')
-            sys.stdout.flush()
-            import traceback
-            print("ANLEd crashed. Please report this issue.")
-            traceback.print_exc()
+        else:
+            Editor(file_arg).run()
+    
+    except Exception:
+        sys.stdout.write('\x1b[2J\x1b[H')
+        sys.stdout.flush()
+        import traceback
+        print("ANLEd crashed. Please report this issue.")
+        traceback.print_exc()
