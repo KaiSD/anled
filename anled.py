@@ -25,7 +25,7 @@ except ImportError:
     import msvcrt
     IS_UNIX = False
 
-_VERSION = "0.9.1"
+_VERSION = "0.9.3"
 
 def term_size() -> Tuple[int, int]:
     size = shutil.get_terminal_size(fallback=(80, 24))
