@@ -1,13 +1,20 @@
 # /usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ANLEd - A Nano-Like Editor
+# ANLEd - A Nano-Like Editor with Ed-like fallback mode where raw mode does not work
 # https://github.com/KaiSD/anled
 # License: MIT
 
-import sys
+from __future__ import annotations
+
+import copy
 import os
-from enum import Enum, auto
+import pathlib
+import shutil
 import subprocess
+import sys
+import textwrap
+from enum import Enum, auto
+from typing import List, Tuple
 
 try:
     import tty
@@ -18,6 +25,19 @@ except ImportError:
     import msvcrt
     IS_UNIX = False
 
+_VERSION = "0.9.1"
+
+def term_size() -> Tuple[int, int]:
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    return size.columns, size.lines
+
+def clear_screen() -> None:
+    print("\x1b[2J\x1b[H", end="")
+
+def wrap_line(line: str, width: int) -> List[str]:
+    if line.endswith("\n"):
+        line = line[:-1]
+    return textwrap.wrap(line, width=width, replace_whitespace=False) or [""]
 
 def get_clip_text_ps():
     return subprocess.check_output(
@@ -69,6 +89,271 @@ def visual_slice(s, start_col, end_col=None):
         end_idx = len(s)
 
     return s[start_idx:end_idx]
+
+class FallbackEditor:
+    APP_NAME = "ANLEd (Fallback)"
+    APP_VERSION = _VERSION
+
+
+    MENU_TEXT = "Commands: q Quit | w/s Move ↑/↓ | u/j Page ↑/↓ | [num] Go to line | h Help"
+    HELP_TEXT = (
+        "\n".join([
+            "=== Help ===",
+            "q         Quit (prompts to save if modified)",
+            "w / s     Move selector up/down one line",
+            "u / j     Move selector up/down one page",
+            "[number]  Go to a specific line number",
+            "e         Replace the selected line",
+            "d         Delete the selected line",
+            "a         Insert a new blank line at the selector",
+            "t         Typewriter mode from the selected line.",
+            "z         Undo last change (unlimited stack)",
+            "h         Toggle this help panel",
+        ])
+    )
+    MENU_LINES = MENU_TEXT.count("\n") + 1
+    FOOTER_LINES = MENU_LINES + 3
+
+    def __init__(self, filename: str | None = None, in_memory: bool = False):
+        self.path = pathlib.Path(filename) if filename else None
+        self.in_memory = in_memory
+        self.lines: List[str] = self._load_file() if self.path and not self.in_memory else ["\n"]
+        self.undo: List[List[str]] = []
+        self.dirty = False
+        self.running = False
+        self.help_mode = False
+
+        cols, rows = term_size()
+        self.term_width = cols
+        self.view_height = max(1, rows - self.FOOTER_LINES)
+        self.top = 0
+        self.selector = 0
+
+    def _load_file(self) -> List[str]:
+        if self.path and self.path.exists() and self.path.stat().st_size > 0:
+            return self.path.read_text(encoding="utf-8").splitlines(True)
+        return ["\n"]
+
+    def _save_file(self) -> None:
+        if self.in_memory:
+            print("In-memory mode: Save not applicable.")
+            return
+
+        if not self.path:
+            print("No file path specified. Cannot save.")
+            return
+
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        content = "".join(self.lines)
+        if not content.endswith('\n'):
+            content += '\n'
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(self.path)
+        self.dirty = False
+
+    def _render_window(self, max_height: int) -> str:
+        if max_height <= 0:
+            return ""
+            
+        rendered: List[str] = []
+        rows_used = 0
+        i = self.top
+        while i < len(self.lines) and rows_used < max_height:
+            wrapped = wrap_line(self.lines[i], self.term_width - 7)
+            for j, chunk in enumerate(wrapped):
+                if rows_used >= max_height:
+                    break
+
+                prefix = f"{i+1:>4} │ " if j == 0 else "     │ "
+                full_line_content = prefix + chunk
+
+                if i == self.selector:
+                    rendered.append(f"\x1b[7m{full_line_content:<{self.term_width}}\x1b[0m")
+                else:
+                    rendered.append(full_line_content)
+
+                rows_used += 1
+            i += 1
+        rendered.extend([""] * (max_height - rows_used))
+        return "\n".join(rendered)
+
+    def _render_footer(self):
+        dirty_indicator = "*" if self.dirty else ""
+        filename_display = '[In-Memory]' if self.in_memory else (str(self.path) or '[No Name]')
+        left_status = f"{self.APP_NAME} {self.APP_VERSION} - {filename_display}{dirty_indicator}"
+        
+        right_status = f"Line {self.selector + 1}/{len(self.lines)}"
+        
+        padding = self.term_width - len(left_status) - len(right_status)
+        if padding < 0:
+            padding = 0
+            left_status = left_status[:self.term_width - len(right_status) - 1] + "…"
+
+        status_bar_content = f"{left_status}{' ' * padding}{right_status}"
+        
+        print(f"\x1b[7m{status_bar_content:<{self.term_width}}\x1b[0m")
+        
+        print("-" * self.term_width)
+        print(self.MENU_TEXT)
+
+    def _edit_line(self) -> None:
+        k = self.selector
+        print(f"Old {k+1}: {self.lines[k].rstrip()}")
+        new = input("New   → ")
+        if not new.endswith("\n"):
+            new += "\n"
+        self.lines[k] = new
+
+    def _delete_line(self) -> None:
+        del self.lines[self.selector]
+        if self.selector >= len(self.lines):
+            self.selector = max(0, len(self.lines) - 1)
+
+    def _add_line(self) -> None:
+        text = input("Line text → ")
+        if not text.endswith("\n"):
+            text += "\n"
+        self.lines.insert(self.selector, text)
+
+    def _typewriter(self) -> None:
+        idx = self.selector
+        blank_streak = 0
+        
+        clear_screen()
+        print("--- Typewriter Mode ---")
+        print("(Press Enter twice on an empty line to exit)")
+        print("-" * self.term_width)
+        
+        context_start = max(0, idx - 5)
+        for i in range(context_start, idx):
+            print(f"{i+1:>4} │ {self.lines[i].rstrip()}")
+        
+        while True:
+            if idx < len(self.lines):
+                print(f"\x1b[36m{idx+1:>4} ≡ {self.lines[idx].rstrip()}\x1b[0m")
+
+            prompt = f"{idx+1:>4} │ "
+            new = input(prompt)
+            
+            print("\x1b[1A\x1b[K", end="")
+            print(f"{idx+1:>4} │ {new}")
+
+            if new == "":
+                blank_streak += 1
+                if blank_streak >= 2:
+                    break
+            else:
+                blank_streak = 0
+            
+            newline = new + "\n"
+            if idx < len(self.lines):
+                self.lines[idx] = newline
+            else:
+                while len(self.lines) <= idx:
+                    self.lines.append("\n")
+                self.lines[idx] = newline
+            idx += 1
+        self.selector = idx - 1
+
+    def run(self) -> str | None:
+        self.running = True
+        help_text_lines = self.HELP_TEXT.splitlines()
+        help_panel_height = len(help_text_lines)
+
+        while self.running:
+            if not self.lines:
+                self.lines.append("\n")
+            self.selector = max(0, min(len(self.lines) - 1, self.selector))
+
+            visible_height = self.view_height
+            if self.help_mode:
+                visible_height = max(1, self.view_height - help_panel_height)
+
+            if self.selector < self.top:
+                self.top = self.selector
+            else:
+                rows_used = 0
+                for i in range(self.top, self.selector + 1):
+                    rows_used += len(wrap_line(self.lines[i], self.term_width - 7))
+
+                if rows_used > visible_height:
+                    new_top = self.selector
+                    rows_to_fill = visible_height
+                    while new_top >= 0:
+                        rows_for_line = len(wrap_line(self.lines[new_top], self.term_width - 7))
+                        
+                        if rows_for_line > rows_to_fill:
+                            if new_top < self.selector:
+                                new_top += 1
+                            break
+
+                        rows_to_fill -= rows_for_line
+                        if new_top == 0:
+                            break
+                        new_top -= 1
+                    self.top = new_top
+                    
+            clear_screen()
+
+            if self.help_mode:
+                file_view_height = self.view_height - help_panel_height
+                file_view_str = self._render_window(max_height=file_view_height)
+                
+                if file_view_str:
+                    print(file_view_str)
+                print("─" * self.term_width)
+                print("\n".join(help_text_lines))
+            else:
+                print(self._render_window(max_height=self.view_height))
+            
+            self._render_footer()
+
+            raw_cmd = input("> ")
+            action = raw_cmd.strip()
+            
+            page_jump = max(1, visible_height - 1)
+
+            if action.isdigit():
+                target_line = int(action) - 1
+                if 0 <= target_line < len(self.lines):
+                    self.selector = target_line
+                continue
+
+            if not action:
+                continue
+
+            if action == "q":
+                if self.dirty and not self.in_memory:
+                    if input("Save changes? (y/N) ").lower().startswith("y"):
+                        self._save_file()
+                self.running = False
+
+            elif action == "w": self.selector = max(0, self.selector - 1)
+            elif action == "s": self.selector = min(len(self.lines) - 1, self.selector + 1)
+            elif action == "u": self.selector = max(0, self.selector - page_jump)
+            elif action == "j": self.selector = min(len(self.lines) - 1, self.selector + page_jump)
+
+            elif action == "h":
+                self.help_mode = not self.help_mode
+
+            elif action in {"e", "d", "a", "t"}:
+                self.undo.append(copy.deepcopy(self.lines))
+                self.dirty = True
+
+                if action == "e" and self.selector < len(self.lines): self._edit_line()
+                elif action == "d" and self.selector < len(self.lines): self._delete_line()
+                elif action == "a": self._add_line()
+                elif action == "t": self._typewriter()
+
+            elif action == "z" and self.undo:
+                self.lines[:] = self.undo.pop()
+                self.dirty = True
+
+        clear_screen()
+        if self.in_memory:
+            return "".join(self.lines)
+        return None
+
 
 
 class Key(Enum):
@@ -323,10 +608,11 @@ class GapBuffer:
 
 class Editor:
     APP_NAME = "ANLEd"
-    APP_VERSION = "0.9.0"
+    APP_VERSION = _VERSION
+    LINE_NUM_WIDTH = 7
 
     DEFAULT_KEY_BINDINGS = {
-        'quit': (Key.CTRL_Q,),
+        'quit': (Key.CTRL_Q,Key.ESCAPE),
         'save': (Key.CTRL_S,),
         'copy': (Key.CTRL_C, Key.CTRL_INSERT),
         'cut': (Key.CTRL_X, Key.SHIFT_DELETE),
@@ -351,12 +637,15 @@ class Editor:
         'insert_char': (Key.CHAR,),
     }
 
-    def __init__(self, filename=None, key_bindings=None):
+    def __init__(self, filename=None, key_bindings=None, in_memory=False):
         self.filename = filename
+        self.in_memory = in_memory
         self.buffer = [] 
-        if self.filename and os.path.exists(self.filename):
+        
+        if self.filename and os.path.exists(self.filename) and not self.in_memory:
             with open(self.filename, encoding="utf-8") as f:
                 self.buffer = [GapBuffer(line.rstrip('\n')) for line in f]
+        
         if not self.buffer:
             self.buffer.append(GapBuffer(''))
 
@@ -450,10 +739,10 @@ class Editor:
         
     def render(self):
         sys.stdout.write('\x1b[?25l')
-        sys.stdout.write('\x1b[H')
 
         width, height = self.get_terminal_size()
         view_height = height - 2
+        text_area_width = width - self.LINE_NUM_WIDTH
 
         if self.cursor_y < self.top_line:
             self.top_line = self.cursor_y
@@ -463,17 +752,21 @@ class Editor:
         visual_cursor_x = self.cursor_char_pos_to_visual(self.cursor_y, self.cursor_x)
         if visual_cursor_x < self.col_offset:
             self.col_offset = visual_cursor_x
-        if visual_cursor_x >= self.col_offset + width:
-            self.col_offset = visual_cursor_x - width + 1
+        if visual_cursor_x >= self.col_offset + text_area_width:
+            self.col_offset = visual_cursor_x - text_area_width + 1
 
-        output_buffer = []
+        output_commands = []
         selection = self.get_selection()
 
         for i in range(view_height):
+            output_commands.append(f'\x1b[{i + 1};1H')
+            
             buf_idx = self.top_line + i
             if buf_idx < len(self.buffer):
                 line_gb = self.buffer[buf_idx]
                 line_str = str(line_gb)
+
+                line_num_prefix = f"{buf_idx + 1:>{self.LINE_NUM_WIDTH - 3}} | "
                 
                 if selection:
                     start_y, start_x, end_y, end_x = selection
@@ -485,15 +778,20 @@ class Editor:
                         part3 = line_str[sel_end_char:]
                         line_str = f"{part1}\x1b[7m{part2}\x1b[m{part3}"
                 
-                line_to_render = visual_slice(line_str, self.col_offset, self.col_offset + width)
-                output_buffer.append(line_to_render.ljust(width))
+                line_to_render = visual_slice(line_str, self.col_offset, self.col_offset + text_area_width)
+                full_line = f"{line_num_prefix}{line_to_render}"
+                output_commands.append(full_line)
             else:
-                output_buffer.append("~".ljust(width))
-        sys.stdout.write('\r\n'.join(output_buffer))
-        sys.stdout.write('\r\n')
+                tilde_prefix = " " * (self.LINE_NUM_WIDTH - 2) + "~ "
+                output_commands.append(tilde_prefix)
+            
+            output_commands.append('\x1b[K')
+
+        sys.stdout.write("".join(output_commands))
 
         dirty_indicator = "*" if self.is_dirty else ""
-        left_status = f"{self.APP_NAME} {self.APP_VERSION} - {self.filename or '[No Name]'}{dirty_indicator}"
+        filename_display = '[In-Memory]' if self.in_memory else (self.filename or '[No Name]')
+        left_status = f"{self.APP_NAME} {self.APP_VERSION} - {filename_display}{dirty_indicator}"
         right_status = f"Ln {self.cursor_y + 1}, Col {visual_cursor_x + 1}"
         
         status_bar = f"\x1b[7m{left_status.ljust(width - len(right_status))}{right_status}\x1b[m"
@@ -505,8 +803,9 @@ class Editor:
         sys.stdout.write(help_bar)
 
         draw_y = self.cursor_y - self.top_line + 1
-        draw_x = visual_cursor_x - self.col_offset + 1
+        draw_x = visual_cursor_x - self.col_offset + 1 + self.LINE_NUM_WIDTH
         sys.stdout.write(f'\x1b[{draw_y};{draw_x}H')
+
         sys.stdout.write('\x1b[?25h')
         sys.stdout.flush()
 
@@ -603,12 +902,13 @@ class Editor:
             self.delete_selection()
 
         if action == 'quit':
-            if self.is_dirty:
+            if self.is_dirty and not self.in_memory:
                 response = self.prompt("Save changes before quitting? (y/n): ")
                 if response and response.lower() == 'y':
                     if self.save_file(): self.running = False
                 elif response and response.lower() == 'n': self.running = False
-            else: self.running = False
+            else:
+                self.running = False
             return
         elif action == 'save': self.save_file()
         elif action == 'copy': self.copy_selection()
@@ -695,6 +995,11 @@ class Editor:
         self.clamp_cursor()
 
     def save_file(self):
+        if self.in_memory:
+            self.status_message = "In-memory mode: Save not applicable."
+            self.is_dirty = False # Still mark as not dirty
+            return True
+
         if not self.filename:
             new_filename = self.prompt("Save as: ")
             if new_filename is None:
@@ -732,14 +1037,33 @@ class Editor:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             sys.stdout.write('\x1b[2J\x1b[H')
             sys.stdout.flush()
+        
+        if self.in_memory:
+            return '\n'.join(str(gb) for gb in self.buffer)
 
 if __name__ == "__main__":
-    file_arg = sys.argv[1] if len(sys.argv) > 1 else None
-    try:
-        Editor(file_arg).run()
-    except Exception:
-        sys.stdout.write('\x1b[2J\x1b[H')
-        sys.stdout.flush()
-        import traceback
-        print("ANLEd crashed. Please report this issue.")
-        traceback.print_exc()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="ANLEd - A Nano-Like Editor")
+    parser.add_argument("file", nargs="?", help="File to edit")
+    parser.add_argument("--nonraw", action="store_true", 
+                       help="Use fallback editor instead of raw terminal mode")
+    
+    args = parser.parse_args()
+    file_arg = args.file
+    
+    if args.nonraw:
+        FallbackEditor(file_arg).run()
+    else:
+        try:
+            Editor(file_arg).run()
+        except termios.error:
+            sys.stdout.write('\x1b[2J\x1b[H')
+            sys.stdout.flush()
+            FallbackEditor(file_arg).run()
+        except Exception:
+            sys.stdout.write('\x1b[2J\x1b[H')
+            sys.stdout.flush()
+            import traceback
+            print("ANLEd crashed. Please report this issue.")
+            traceback.print_exc()
