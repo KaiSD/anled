@@ -25,7 +25,7 @@ except ImportError:
     import msvcrt
     IS_UNIX = False
 
-_VERSION = "0.9.2"
+_VERSION = "0.9.1"
 
 def term_size() -> Tuple[int, int]:
     size = shutil.get_terminal_size(fallback=(80, 24))
@@ -375,19 +375,18 @@ class FallbackEditor:
         return None
 
 class Key(Enum):
-    CTRL_A, CTRL_C, CTRL_D, CTRL_E, CTRL_F, CTRL_H, CTRL_L, CTRL_N, CTRL_P, \
-    CTRL_Q, CTRL_S, CTRL_V, CTRL_X, CTRL_Y, ENTER, ESCAPE, BACKSPACE, TAB = range(18)
-    UP, DOWN, LEFT, RIGHT, HOME, END, DELETE, PAGE_UP, PAGE_DOWN, INSERT = range(18, 28)
+    CTRL_A, CTRL_C, CTRL_D, CTRL_E, CTRL_F, CTRL_G, CTRL_H, CTRL_L, CTRL_N, CTRL_P, \
+    CTRL_Q, CTRL_S, CTRL_V, CTRL_X, CTRL_Y, ENTER, ESCAPE, BACKSPACE, TAB = range(19)
+    UP, DOWN, LEFT, RIGHT, HOME, END, DELETE, PAGE_UP, PAGE_DOWN, INSERT = range(19, 29)
     SHIFT_UP, SHIFT_DOWN, SHIFT_LEFT, SHIFT_RIGHT, SHIFT_HOME, SHIFT_END, \
-    SHIFT_PAGE_UP, SHIFT_PAGE_DOWN, SHIFT_INSERT, SHIFT_DELETE = range(28, 38)
+    SHIFT_PAGE_UP, SHIFT_PAGE_DOWN, SHIFT_INSERT, SHIFT_DELETE = range(29, 39)
     CTRL_LEFT, CTRL_RIGHT, CTRL_HOME, CTRL_END, CTRL_UP, CTRL_DOWN, \
-    CTRL_INSERT, CTRL_DELETE = range(38, 46)
+    CTRL_INSERT, CTRL_DELETE = range(39, 47)
     CTRL_SHIFT_LEFT, CTRL_SHIFT_RIGHT, CTRL_SHIFT_HOME, CTRL_SHIFT_END, \
-    CTRL_SHIFT_UP, CTRL_SHIFT_DOWN, CTRL_SHIFT_INSERT, CTRL_SHIFT_DELETE = range(46, 54)
+    CTRL_SHIFT_UP, CTRL_SHIFT_DOWN, CTRL_SHIFT_INSERT, CTRL_SHIFT_DELETE = range(47, 55)
     CTRL_0, CTRL_1, CTRL_2, CTRL_3, CTRL_4, CTRL_5, CTRL_6, CTRL_7, CTRL_8, \
-    CTRL_9 = range(54, 64)
-    F1 = auto()
-    CTRL_G = auto()
+    CTRL_9 = range(55, 65)
+    F1, F2 = range(65, 67)
     UNKNOWN = auto()
     CHAR = auto()
 
@@ -398,6 +397,7 @@ class KeyDecoder:
             '\x1b[H': Key.HOME, '\x1b[F': Key.END, '\x1b[2~': Key.INSERT, '\x1b[3~': Key.DELETE,
             '\x1b[5~': Key.PAGE_UP, '\x1b[6~': Key.PAGE_DOWN,
             '\x1b[11~': Key.F1, '\x1bOP': Key.F1,
+            '\x1b[12~': Key.F2, '\x1bOQ': Key.F2,
             '\x1b[1;2A': Key.SHIFT_UP, '\x1b[1;2B': Key.SHIFT_DOWN,
             '\x1b[1;2C': Key.SHIFT_RIGHT, '\x1b[1;2D': Key.SHIFT_LEFT,
             '\x1b[1;2H': Key.SHIFT_HOME, '\x1b[1;2F': Key.SHIFT_END,
@@ -427,7 +427,7 @@ class KeyDecoder:
             INSERT=0x2D; DELETE=0x2E; PAGE_UP=0x21; PAGE_DOWN=0x22;
             A=0x41; C=0x43; D=0x44; E=0x45; F=0x46; L=0x4C; H=0x48; N=0x4E; P=0x50;
             Q=0x51; S=0x53; V=0x56; X=0x58; Y=0x59;
-            F1=0x70; G=0x47;
+            F1=0x70; F2=0x71; G=0x47;
             N0=0x30; N1=0x31; N2=0x32; N3=0x33; N4=0x34; N5=0x35; N6=0x36; N7=0x37; N8=0x38; N9=0x39;
         class KEY_EVENT_RECORD(ctypes.Structure):
             _fields_ = [("bKeyDown", wintypes.BOOL),
@@ -503,7 +503,7 @@ class KeyDecoder:
                         VK.HOME: Key.HOME, VK.END: Key.END, VK.DELETE: Key.DELETE,
                         VK.INSERT: Key.INSERT, VK.PAGE_UP: Key.PAGE_UP, VK.PAGE_DOWN: Key.PAGE_DOWN,
                         VK.BACK: Key.BACKSPACE, VK.TAB: Key.TAB, VK.RETURN: Key.ENTER,
-                        VK.ESCAPE: Key.ESCAPE, VK.F1: Key.F1,
+                        VK.ESCAPE: Key.ESCAPE, VK.F1: Key.F1, VK.F2: Key.F2,
                     }
                     if vk in key_map: return key_map[vk], None
 
@@ -630,14 +630,14 @@ class Editor:
     HELP_TEXT = textwrap.dedent("""\
         ─────── ANLEd Help (v{version}) ───────
         F1/Ctrl-H: Toggle this help panel
-        Ctrl-S:    Save file
-        Ctrl-Q:    Quit editor
+        Ctrl-S / F2:    Save file
+        Ctrl-Q / Esc:    Quit editor
         
         [Selection & Clipboard]
         Shift+Move: Select text
-        Ctrl-C:     Copy selection
-        Ctrl-X:     Cut selection
-        Ctrl-V:     Paste
+        Ctrl-C / Ctrl-Insert:     Copy selection
+        Ctrl-X / Shift-Delete:     Cut selection
+        Ctrl-V / Shift-Insert:     Paste
         
         [Cursor Movement]
         Arrows:          Move cursor
@@ -649,7 +649,7 @@ class Editor:
 
     DEFAULT_KEY_BINDINGS = {
         'quit': (Key.CTRL_Q,Key.ESCAPE),
-        'save': (Key.CTRL_S,),
+        'save': (Key.CTRL_S, Key.F2),
         'toggle_help': (Key.F1, Key.CTRL_H),
         'copy': (Key.CTRL_C, Key.CTRL_INSERT),
         'cut': (Key.CTRL_X, Key.SHIFT_DELETE),
@@ -949,7 +949,7 @@ class Editor:
         self.is_selecting = False
 
     def handle_keypress(self, key, char):
-        self.status_message = "HELP: Ctrl-S save | Ctrl-Q quit | F1/Ctrl-G help"
+        self.status_message = "HELP: Ctrl-S save | Ctrl-Q quit | F1/Ctrl-H help"
 
         if key in self._plain_movement_keys and self.is_selecting:
             self.is_selecting = False
@@ -1125,12 +1125,11 @@ if __name__ == "__main__":
     file_arg = args.file
     fallback = args.nonraw
 
-    try:
-        if IS_UNIX:
-            try:
-                termios.tcgetattr(sys.stdin.fileno())
-            except termios.error:
-                fallback = True
+    if IS_UNIX:
+        try:
+            termios.tcgetattr(sys.stdin.fileno())
+        except termios.error:
+            fallback = True
     
     try:
         if fallback:
